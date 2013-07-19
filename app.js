@@ -23,7 +23,7 @@ var express = require('express')
 
 var app = express();
 
-
+ 
 function renderJadeFile(template, options) {
   var fn = jade.compile(template, options);
   return fn(options.locals);
