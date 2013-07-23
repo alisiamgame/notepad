@@ -13,8 +13,10 @@ var express = require('express')
   , mongoose = require('mongoose')
   , mongoStore = require('connect-mongodb')
   , mailer = require('mailer')
+  , stylus = require('stylus')
   , connectTimeout = require('connect-timeout')
   , models = require('./models')
+  //, flash = require('connect-flash')
   , db
   , Document
   , User
@@ -65,6 +67,9 @@ emails = {
   }
 };
 
+//app.helpers(require('./helpers.js').helpers);
+app.locals = require('./helpers.js').helpers;
+app.locals.pretty = true;
 
 //development only
 if ('development' == app.get('env')) {
@@ -78,8 +83,8 @@ models.defineModels(mongoose, function() {
 	app.User = User = mongoose.model('User');
 	app.LoginToken = LoginToken = mongoose.model('LoginToken');
 	
-	console.log(app.get('db-uri'));
-	console.log(LoginToken);
+	//console.log(app.get('db-uri'));
+	//console.log(LoginToken);
 	
 	db = mongoose.connect(app.set('db-uri'));
 });
@@ -95,6 +100,20 @@ app.use(express.cookieParser());
 app.use(connectTimeout({ time: 10000 }));
 app.use(express.session({ secret: 'secret' }));
 app.use(express.methodOverride());
+app.use(stylus.middleware({ src: __dirname + '/public' }));
+app.use(function(req, res, next){
+	res.locals.messages = req.session.messages;
+	next();
+});
+app.use(function(req, res, next){
+	var session = req.session;
+	var messages = session.messages || (session.messages = []);
+	
+	req.flash = function(type, message) {
+		messages.push([type, message]);
+	};
+	next();
+});
 app.use(app.router);
 app.set('mailOptions', {
     host: 'localhost',
@@ -153,29 +172,199 @@ function loadUser(req, res, next) {
 	}
 }
 
-//app.get('/', routes.index);
 app.get('/', loadUser, function(req, res){
 	console.log('get');
 	res.redirect('/documents');
 });
 
-//app.get('/users', user.list);
+//Error handling
+function NotFound(msg) {
+  this.name = 'NotFound';
+  Error.call(this, msg);
+  Error.captureStackTrace(this, arguments.callee);
+}
 
+util.inherits(NotFound, Error);
 
-app.get('/documents', function(req, res){
+app.get('/404', function(req, res) {
+	throw new NotFound;
+});
+
+app.get('/500', function(req, res) {
+	throw new Error('An expected error');
+});
+
+app.get('/bad', function(req, res) {
+	unknownMethod();
+});
+/*
+app.error(function(err, req, res, next) {
+	if (err instanceof NotFound) {
+		res.render('404.jade', { status: 404 });
+	} else {
+		next(err);
+	}
+});
+
+if (app.settings.env == 'production') {
+	app.error(function(err, req, res) {
+		res.render('500.jade', {
+			status: 500,
+				locals: {
+					error: err
+				} 
+		});
+	});
+}
+*/
+// Document list
+app.get('/documents', loadUser, function(req, res){
 	console.log('get documents');
+	Document.find({ 'user_id': req.currentUser.id }, '', { sort: ['title', 'descending'] }, function(err, documents) {
+		documents = documents.map(function(d) {
+			return { title: d.title, id: d._id };
+		});
+		
+		res.locals = { documents: documents, currentUser: req.currentUser };
+		console.log(req.flash());
+		res.render('documents/index.jade', { message: req.flash('info') });
+	});
+});
+
+app.get('/documents/new', loadUser, function(req, res) {
+	console.log('get documents-new');
 	
-	//var documents = Document.find().all();
+	res.locals = { d: new Document(), currentUser: req.currentUser };
+	res.render('documents/new.jade');
+});
+
+app.post('/documents.:format?', loadUser, function(req, res) {
+	var d = new Document(req.body);
+	//console.log(d);
+	d.user_id = req.currentUser.id;
+	d.save(function() {
+		req.session.messages = 'Document created';
+		switch (req.params.format) {
+			case 'json':
+				var data = d.toObject();
+				data.id = data._id;
+				//console.log(data);
+				res.send(data);
+				break;
+				
+			default:
+				req.flash('info', 'Document created');
+				console.log(d._id);
+				res.redirect('/documents/' + d._id + '.' + req.params.format);
+		}
+	});
+});
+
+//Read document
+app.get('/documents/:id.:format?', loadUser, function(req, res, next) {
+	Document.findOne({ _id: req.params.id, user_id: req.currentUser.id }, function(err, d) {
+		if (!d) return next(new NotFound('Document not found'));
+
+		switch (req.params.format) {
+			case 'json':
+				res.send(d.toObject());
+				break;
+
+			case 'html':
+				res.send(markdown.toHTML(d.data));
+				break;
+
+			default:
+				res.locals = { d: d, currentUser: req.currentUser };
+				res.render('documents/show.jade');
+		}
+	});
+});
+
+app.put('/documents/:id.:format?', loadUser, function(req, res, next) {
+	console.log('put documents-id.:format');
 	
-	//res.send(documents);
+	Document.findOne({ _id: req.params.id, user_id: req.currentUser.id }, function(err, d) {
+		if (!d) return next(new NotFound('Document not found'));
+		d.title = req.body.title;
+		d.data = req.body.data;
+
+		d.save(function(err) {
+			switch (req.params.format) {
+				case 'json':
+					res.send(d.toObject());
+					break;
+
+				default:
+					req.flash('info', 'Document updated');
+					res.redirect('/documents');
+			}
+		});
+	});
+});
+
+app.del('/documents/:id.:format?', loadUser, function(req, res, next) {
+	Document.findOne({ _id: req.params.id, user_id: req.currentUser.id }, function(err, d) {
+		if (!d) return next(new NotFound('Document not found'));
+		
+		d.remove(function() {
+			switch (req.params.format) {
+			case 'json':
+				res.send('true');
+				break;
+				
+			default:
+				req.flash('info', 'Document deleted');
+				res.redirect('/documents');
+			}
+		});
+	});
+});
+
+app.get('/users/new', function(req, res){
+	//console.log('get users-new');
+	
+	res.locals.user = new User();
+	res.render('users/new.jade');
+});
+
+app.post('/users.:format?', function(req, res){
+	//console.log('post users');
+	var user = new User(req.body.user);
+	
+	function userSaveFailed() {
+		console.log('userSaveFailed');
+		req.flash('error', 'Account creation failed');
+		res.locals.user = user;
+		res.render('users/new.jade');
+	}
+	
+	user.save(function(err) {
+		console.log(err);
+		if(err) return userSaveFailed();
+		
+		console.log('created');
+		req.flash('info', 'Your account has been created');
+		emails.sendWelcome(user);
+		
+		switch(req.params.format) {
+			case 'json':
+				res.send(user.toObject());
+				console.log('json');
+				break;
+			default:
+				console.log('default');
+				req.session.user_id = user.id;
+				res.redirect('/documents');
+		}
+	});
 });
 
 app.get('/sessions/new', function(req, res){
 	console.log('get sessions-new');
 	
-	res.render('sessions/new.jade', {
-		locals: { user: new User() }
-	});
+	res.locals.user = new User();
+	res.render('sessions/new.jade');
 });
 
 app.post('/sessions', function(req, res){
@@ -200,6 +389,35 @@ app.post('/sessions', function(req, res){
       res.redirect('/sessions/new');
     }
   }); 
+});
+
+app.del('/sessions', loadUser, function(req, res) {
+	if (req.session) {
+		LoginToken.remove({ email: req.currentUser.email }, function() {});
+		res.clearCookie('logintoken');
+		req.session.destroy(function() {});
+	}
+	res.redirect('/sessions/new');
+});
+
+//Search
+app.post('/search.:format?', loadUser, function(req, res) {
+	Document.find({ user_id: req.currentUser.id, keywords: req.body.s },
+			function(err, documents) {
+				console.log(documents);
+				console.log(err);
+				switch (req.params.format) {
+					case 'json':
+						res.send(documents.map(function(d) {
+							return { title: d.title, id: d._id };
+						}));
+						break;
+
+					default:
+						res.send('Format not available', 400);
+						break;
+				}
+			});
 });
 
 http.createServer(app).listen(app.get('port'), function(){

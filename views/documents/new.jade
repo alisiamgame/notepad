@@ -3,5 +3,5 @@
   p
     a.button(href='/documents') &larr; All Documents
   form(method='post', action='/documents')
-    !=partial('fields', { locals: { d: d } })
+    include fields
 
